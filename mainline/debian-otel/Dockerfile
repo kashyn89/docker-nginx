@@ -3,52 +3,25 @@
 #
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
-FROM debian:bookworm-slim
+FROM nginx:1.27.3
 
-LABEL maintainer="NGINX Docker Maintainers <docker-maint@nginx.com>"
+ENV OTEL_VERSION     0.1.0
 
-ENV NGINX_VERSION   1.26.2
-ENV NJS_VERSION     0.8.8
-ENV NJS_RELEASE     1~bookworm
-ENV PKG_RELEASE     1~bookworm
-ENV DYNPKG_RELEASE  2~bookworm
-
-RUN set -x \
-# create nginx user/group first, to be consistent throughout docker variants
-    && groupadd --system --gid 101 nginx \
-    && useradd --system --gid nginx --no-create-home --home /nonexistent --comment "nginx user" --shell /bin/false --uid 101 nginx \
-    && apt-get update \
-    && apt-get install --no-install-recommends --no-install-suggests -y gnupg1 ca-certificates \
-    && \
-    NGINX_GPGKEYS="573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62 8540A6F18833A80E9C1653A42FD21310B49F6B46 9E9BE90EACBCDE69FE9B204CBCDCD8A38D88A2B3"; \
+RUN set -x; \
     NGINX_GPGKEY_PATH=/etc/apt/keyrings/nginx-archive-keyring.gpg; \
-    export GNUPGHOME="$(mktemp -d)"; \
-    found=''; \
-    for NGINX_GPGKEY in $NGINX_GPGKEYS; do \
-    for server in \
-        hkp://keyserver.ubuntu.com:80 \
-        pgp.mit.edu \
-    ; do \
-        echo "Fetching GPG key $NGINX_GPGKEY from $server"; \
-        gpg1 --keyserver "$server" --keyserver-options timeout=10 --recv-keys "$NGINX_GPGKEY" && found=yes && break; \
-    done; \
-    test -z "$found" && echo >&2 "error: failed to fetch GPG key $NGINX_GPGKEY" && exit 1; \
-    done; \
-    gpg1 --export "$NGINX_GPGKEYS" > "$NGINX_GPGKEY_PATH" ; \
-    rm -rf "$GNUPGHOME"; \
-    apt-get remove --purge --auto-remove -y gnupg1 && rm -rf /var/lib/apt/lists/* \
-    && dpkgArch="$(dpkg --print-architecture)" \
+    dpkgArch="$(dpkg --print-architecture)" \
     && nginxPackages=" \
         nginx=${NGINX_VERSION}-${PKG_RELEASE} \
         nginx-module-xslt=${NGINX_VERSION}-${DYNPKG_RELEASE} \
         nginx-module-geoip=${NGINX_VERSION}-${DYNPKG_RELEASE} \
         nginx-module-image-filter=${NGINX_VERSION}-${DYNPKG_RELEASE} \
         nginx-module-njs=${NGINX_VERSION}+${NJS_VERSION}-${NJS_RELEASE} \
+        nginx-module-otel=${NGINX_VERSION}+${OTEL_VERSION}-${PKG_RELEASE} \
     " \
     && case "$dpkgArch" in \
         amd64|arm64) \
 # arches officialy built by upstream
-            echo "deb [signed-by=$NGINX_GPGKEY_PATH] https://nginx.org/packages/debian/ bookworm nginx" >> /etc/apt/sources.list.d/nginx.list \
+            echo "deb [signed-by=$NGINX_GPGKEY_PATH] https://nginx.org/packages/mainline/debian/ bookworm nginx" >> /etc/apt/sources.list.d/nginx.list \
             && apt-get update \
             ;; \
         *) \
@@ -74,10 +47,10 @@ RUN set -x \
                 xsltproc \
             && ( \
                 cd "$tempDir" \
-                && REVISION="f43e929dc7a6111ef5d9ecb281a75749f7934261" \
+                && REVISION="0286c5190d972a49bffc9bf247885dd510ce8181" \
                 && REVISION=${REVISION%~*} \
                 && curl -f -L -O https://github.com/nginx/pkg-oss/archive/${REVISION}.tar.gz \
-                && PKGOSSCHECKSUM="315e9e9040253396ebd9f540557e69cda7d9754a7895c3bf04fbf79d43be8d56e8efc6c22c21c87632039340080511179946456bbc4660e8faf171d130b475a6 *${REVISION}.tar.gz" \
+                && PKGOSSCHECKSUM="1e546bd15d7bc68e1772ecb6a73e29ba108ee5554a28928e57af038a9e8fc4f5cd35708ce89ad1dfaac97d870e663d32ef41045611d30b20d38b46816e3ab535 *${REVISION}.tar.gz" \
                 && if [ "$(openssl sha512 -r ${REVISION}.tar.gz)" = "$PKGOSSCHECKSUM" ]; then \
                     echo "pkg-oss tarball checksum verification succeeded!"; \
                 else \
@@ -87,12 +60,12 @@ RUN set -x \
                 && tar xzvf ${REVISION}.tar.gz \
                 && cd pkg-oss-${REVISION} \
                 && cd debian \
-                && for target in base module-geoip module-image-filter module-njs module-xslt; do \
+                && for target in module-otel; do \
                     make rules-$target; \
                     mk-build-deps --install --tool="apt-get -o Debug::pkgProblemResolver=yes --no-install-recommends --yes" \
                         debuild-$target/nginx-$NGINX_VERSION/debian/control; \
                 done \
-                && make base module-geoip module-image-filter module-njs module-xslt \
+                && make module-otel \
             ) \
 # we don't remove APT lists here because they get re-downloaded and removed later
             \
@@ -124,22 +97,4 @@ RUN set -x \
     && if [ -n "$tempDir" ]; then \
         apt-get purge -y --auto-remove \
         && rm -rf "$tempDir" /etc/apt/sources.list.d/temp.list; \
-    fi \
-# forward request and error logs to docker log collector
-    && ln -sf /dev/stdout /var/log/nginx/access.log \
-    && ln -sf /dev/stderr /var/log/nginx/error.log \
-# create a docker-entrypoint.d directory
-    && mkdir /docker-entrypoint.d
-
-COPY docker-entrypoint.sh /
-COPY 10-listen-on-ipv6-by-default.sh /docker-entrypoint.d
-COPY 15-local-resolvers.envsh /docker-entrypoint.d
-COPY 20-envsubst-on-templates.sh /docker-entrypoint.d
-COPY 30-tune-worker-processes.sh /docker-entrypoint.d
-ENTRYPOINT ["/docker-entrypoint.sh"]
-
-EXPOSE 80
-
-STOPSIGNAL SIGQUIT
-
-CMD ["nginx", "-g", "daemon off;"]
+    fi
